@@ -1,134 +1,112 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { Plugin, Editor, TFile } from "obsidian";
 
-// Remember to rename these classes and interfaces!
+const IMAGE_STORAGE_PATH = "images";
+const IMAGE_JSON_PATH = `${IMAGE_STORAGE_PATH}/images.json`;
 
-interface MyPluginSettings {
-	mySetting: string;
-}
+export default class Image64 extends Plugin {
+  async onload() {
+    this.ensureJsonFileExists();
 
-const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
-}
+    this.registerEvent(
+      this.app.workspace.on("editor-paste", async (evt: ClipboardEvent, editor: Editor) => {
+        if (!evt.clipboardData) return;
+        const items: DataTransferItemList = evt.clipboardData.items;
+        if (!items) return;
 
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+        for (let i = 0; i < items.length; i++) {
+          const item: DataTransferItem = items[i];
+          if (item.type.startsWith("image/")) {
+            evt.preventDefault();
+            await this.processImage(item, editor);
+          }
+        }
+      })
+    );
 
-	async onload() {
-		await this.loadSettings();
+    // 📌 JSON 데이터를 이용하여 HTML 태그를 렌더링하는 기능 추가
+    this.registerMarkdownPostProcessor(async (el, ctx) => {
+      const placeholders: NodeListOf<HTMLSpanElement> = el.querySelectorAll("span.base64-image-placeholder");
+      for (const placeholder of Array.from(placeholders)) {
+        const imageKey = placeholder.getAttribute("data-image-key");
+        if (imageKey) {
+          const base64Image = await this.getBase64FromJson(imageKey);
+          if (base64Image) {
+            const imgElement = document.createElement("img");
+            imgElement.src = base64Image;
+            imgElement.style.maxWidth = "100%";
+            placeholder.replaceWith(imgElement);
+          } else {
+          }
+        }
+      }
+    });
+  }
 
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
+  async ensureJsonFileExists(): Promise<void> {
+    const vault = this.app.vault;
 
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
+    if (!vault.getAbstractFileByPath(IMAGE_STORAGE_PATH)) {
+      await vault.createFolder(IMAGE_STORAGE_PATH);
+    }
 
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
+    const file = vault.getAbstractFileByPath(IMAGE_JSON_PATH);
+    if (!(file instanceof TFile)) {
+      await vault.adapter.write(IMAGE_JSON_PATH, JSON.stringify({}, null, 2));
+    }
+  }
 
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
-			}
-		});
+  async processImage(item: DataTransferItem, editor: Editor): Promise<void> {
+    const file: File | null = item.getAsFile();
+    if (!file) {
+      return;
+    }
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
+    const reader: FileReader = new FileReader();
+    reader.onload = async () => {
+      const base64Data: string = reader.result as string;
+      const imageKey: string = `image_${Date.now()}`;
 
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
-		});
+      await this.saveImageToJson(imageKey, base64Data);
+      
+      // JSON에서 불러올 수 있도록 `span` 태그 삽입
+      const placeholder = `<span class="base64-image-placeholder" data-image-key="${imageKey}">📌 로드 중...</span>`;
+      editor.replaceSelection(placeholder);
+    };
+    reader.readAsDataURL(file);
+  }
 
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
-	}
+  async saveImageToJson(imageKey: string, base64Data: string): Promise<void> {
+    const vault = this.app.vault;
 
-	onunload() {
+    let jsonData: Record<string, string> = {};
+    const file = vault.getAbstractFileByPath(IMAGE_JSON_PATH);
 
-	}
+    if (file instanceof TFile) {
+      try {
+        const content: string = await vault.read(file);
+        jsonData = JSON.parse(content);
+      } catch (e) {
+        jsonData = {};
+      }
+    }
 
-	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-	}
+    jsonData[imageKey] = base64Data;
 
-	async saveSettings() {
-		await this.saveData(this.settings);
-	}
-}
+    await vault.adapter.write(IMAGE_JSON_PATH, JSON.stringify(jsonData, null, 2));
+  }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
+  async getBase64FromJson(imageKey: string): Promise<string | null> {
+    const vault = this.app.vault;
 
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
-
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
-}
-
-class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
-
-	constructor(app: App, plugin: MyPlugin) {
-		super(app, plugin);
-		this.plugin = plugin;
-	}
-
-	display(): void {
-		const {containerEl} = this;
-
-		containerEl.empty();
-
-		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
-			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
-				.onChange(async (value) => {
-					this.plugin.settings.mySetting = value;
-					await this.plugin.saveSettings();
-				}));
-	}
+    const file = vault.getAbstractFileByPath(IMAGE_JSON_PATH);
+    if (file instanceof TFile) {
+      try {
+        const content: string = await vault.read(file);
+        const jsonData: Record<string, string> = JSON.parse(content);
+        return jsonData[imageKey] || null;
+      } catch (e) {
+      }
+    }
+    return null;
+  }
 }
